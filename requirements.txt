@@ -1,0 +1,5 @@
+PyYAML==6.0.2
+jmespath==1.0.1
+WeasyPrint
+aiogram==3.13.1
+lxml

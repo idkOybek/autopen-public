@@ -1,0 +1,27 @@
+# env-файлы
+.env
+.env.*
+
+# локальные конфиги с секретами
+config.local.yml
+config.local.json
+secrets.yml
+
+# логи
+logs/
+*.log
+
+# временные файлы
+tmp/
+*.tmp
+
+# базы и дампы
+*.sqlite
+*.db
+dump.sql
+backup/
+
+# IDE / редакторы
+.vscode/
+.idea/
+*.swp

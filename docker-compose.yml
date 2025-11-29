@@ -1,0 +1,39 @@
+services:
+  autopen-core:
+    build: .
+    image: autopen/core:dev
+    container_name: autopen-core
+    network_mode: host              # заложим с ходу, позже будем сканить
+    environment:
+      AUTOPEN_HOME: /workspace
+    volumes:
+      - /opt/autopen:/workspace:rw
+      - /var/run/docker.sock:/var/run/docker.sock   # ⬅ доступ к Docker демону хоста
+    command: ["sleep","infinity"]   # держим контейнер живым
+    restart: unless-stopped
+  autopen-bot:
+    image: autopen/core:dev
+    network_mode: host
+    environment:
+      AUTOPEN_HOME: /workspace
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
+      TELEGRAM_ALLOW: ${TELEGRAM_ALLOW}    # "12345,67890"
+    volumes:
+      - /opt/autopen:/workspace:rw
+      - /var/run/docker.sock:/var/run/docker.sock
+    command: ["python","-m","core.tg_bot"]
+    depends_on:
+      - autopen-core
+    restart: unless-stopped
+  node-exporter:
+    image: prom/node-exporter:v1.8.2
+    network_mode: host
+    pid: host
+    command:
+      - '--collector.textfile.directory=/metrics'
+    volumes:
+      - /opt/autopen/metrics:/metrics:ro
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/rootfs:ro
+    restart: unless-stopped

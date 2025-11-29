@@ -1,0 +1,182 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+DC="docker compose"
+AUTOPEN_HOME="${AUTOPEN_HOME:-/opt/autopen}"
+
+usage() {
+  cat <<EOF
+usage: $0 {up|down|scan|stop|status|last|init|timer-template}
+
+Быстрые команды:
+  up              - docker compose up -d
+  down            - docker compose down
+  scan            - запустить скан (python /app/autopen.py run)
+  stop            - остановить скан (python /app/autopen.py stop)
+  status          - показать статус из контейнера (autopen.py status)
+  last            - показать путь к последнему HTML-отчёту
+
+Утилиты развертывания:
+  init            - создать структуру каталогов и шаблоны в ${AUTOPEN_HOME}
+  timer-template  - сгенерировать шаблоны systemd unit/timer в
+                    ${AUTOPEN_HOME}/systemd
+EOF
+}
+
+init_autopen_home() {
+  echo "[init] Используем AUTOPEN_HOME=${AUTOPEN_HOME}"
+
+  # Базовая структура
+  mkdir -p \
+    "${AUTOPEN_HOME}/config" \
+    "${AUTOPEN_HOME}/data/incoming" \
+    "${AUTOPEN_HOME}/out" \
+    "${AUTOPEN_HOME}/plugins.d" \
+    "${AUTOPEN_HOME}/parsers.d" \
+    "${AUTOPEN_HOME}/systemd"
+
+  # targets.txt (если его ещё нет)
+  if [[ ! -f "${AUTOPEN_HOME}/config/targets.txt" ]]; then
+    cat > "${AUTOPEN_HOME}/config/targets.txt" <<'EOF'
+# Список целей для Autopen
+# Примеры:
+#   https://example.com
+#   192.168.0.0/24
+#   10.0.0.1-10.0.0.50
+
+https://smic.uz
+EOF
+    echo "[init] Создан шаблон ${AUTOPEN_HOME}/config/targets.txt"
+  else
+    echo "[init] ${AUTOPEN_HOME}/config/targets.txt уже существует, пропускаю"
+  fi
+
+  # pipeline.yaml (опционально, только если нет)
+  if [[ ! -f "${AUTOPEN_HOME}/config/pipeline.yaml" ]]; then
+    cat > "${AUTOPEN_HOME}/config/pipeline.yaml" <<'EOF'
+# Конвейер запуска инструментов.
+# Если удалить этот файл, Autopen использует дефолт:
+#   steps: [httpx, nmap]
+
+steps:
+  - httpx
+  - nmap
+
+# Максимальное число параллельных задач (пока не используется в коде, задел на будущее)
+concurrency: 4
+
+# Продолжать выполнение pipeline, даже если один из шагов упал
+continue_on_error: true
+EOF
+    echo "[init] Создан шаблон ${AUTOPEN_HOME}/config/pipeline.yaml"
+  else
+    echo "[init] ${AUTOPEN_HOME}/config/pipeline.yaml уже существует, пропускаю"
+  fi
+
+  # README для структуры (не обязательно, но полезно)
+  if [[ ! -f "${AUTOPEN_HOME}/README.txt" ]]; then
+    cat > "${AUTOPEN_HOME}/README.txt" <<EOF
+Autopen home: ${AUTOPEN_HOME}
+
+Структура:
+  config/         - конфиги (targets.txt, pipeline.yaml, ftp.yaml и т.д.)
+  data/incoming/  - входящие данные (например, targets_tg.txt от бота)
+  out/            - результаты запусков (run_id/...)
+  plugins.d/      - описания плагинов (YAML для внешних тулов)
+  parsers.d/      - описания парсеров (YAML для ndjson/xml)
+  systemd/        - заготовки unit/timer для systemd
+
+Эта директория монтируется в контейнер как /workspace.
+EOF
+    echo "[init] Создан ${AUTOPEN_HOME}/README.txt"
+  fi
+
+  echo "[init] Готово."
+}
+
+make_timer_templates() {
+  echo "[timer-template] Генерирую шаблоны systemd в ${AUTOPEN_HOME}/systemd"
+
+  mkdir -p "${AUTOPEN_HOME}/systemd"
+
+  local service_file="${AUTOPEN_HOME}/systemd/autopen-scan.service"
+  local timer_file="${AUTOPEN_HOME}/systemd/autopen-scan.timer"
+
+  # Сервис, который запускает один скан
+  cat > "${service_file}" <<'EOF'
+[Unit]
+Description=Run Autopen security scan
+
+[Service]
+Type=oneshot
+# Директория, где лежит docker-compose.yml и autopenctl
+WorkingDirectory=/opt/autopen
+# Путь к autopenctl (при желании поправь под свой)
+ExecStart=/usr/local/bin/autopenctl scan
+EOF
+
+  # Таймер, который каждые 6 часов запускает сервис
+  cat > "${timer_file}" <<'EOF'
+[Unit]
+Description=Run Autopen scan every 6 hours
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=6h
+Unit=autopen-scan.service
+
+[Install]
+WantedBy=timers.target
+EOF
+
+  echo "[timer-template] Создано:"
+  echo "  ${service_file}"
+  echo "  ${timer_file}"
+  echo
+  echo "Чтобы включить таймер, выполни (от root, после копирования файлов в /etc/systemd/system):"
+  echo "  sudo cp ${service_file} /etc/systemd/system/"
+  echo "  sudo cp ${timer_file} /etc/systemd/system/"
+  echo "  sudo systemctl daemon-reload"
+  echo "  sudo systemctl enable --now autopen-scan.timer"
+}
+
+case "${1:-}" in
+  up)
+    $DC up -d
+    ;;
+  down)
+    $DC down
+    ;;
+  scan)
+    $DC exec -T autopen-core python /app/autopen.py run
+    ;;
+  stop)
+    $DC exec -T autopen-core python /app/autopen.py stop
+    ;;
+  status)
+    $DC exec -T autopen-core python /app/autopen.py status
+    ;;
+  last)
+    # Показываем последний HTML-отчёт внутри контейнера
+    $DC exec -T autopen-core bash -lc '
+      set -o pipefail
+      cd /workspace
+      last_report=$(ls -1 out/*/04-report/report.html 2>/dev/null | sort | tail -n1 || true)
+      if [[ -z "$last_report" ]]; then
+        echo "Нет отчётов"
+      else
+        echo "$last_report"
+      fi
+    '
+    ;;
+  init)
+    init_autopen_home
+    ;;
+  timer-template)
+    make_timer_templates
+    ;;
+  *)
+    usage
+    exit 2
+    ;;
+esac
